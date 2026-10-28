@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>PhotoHub</string>
+	<key>CFBundleDisplayName</key>
+	<string>PhotoHub</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.photohub</string>
+	<key>CFBundleExecutable</key>
+	<string>PhotoHub</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>de</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>de</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.photography</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Findet doppelte Fotos in einem Ordner.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>PhotoHub durchsucht den gewählten Ordner nach doppelten Fotos.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>PhotoHub durchsucht den gewählten Ordner nach doppelten Fotos.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>PhotoHub durchsucht den gewählten Ordner nach doppelten Fotos.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>PhotoHub durchsucht den gewählten Ordner nach doppelten Fotos.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>PhotoHub durchsucht den gewählten Ordner nach doppelten Fotos.</string>
+</dict>
+</plist>
