@@ -262,7 +262,7 @@ enum FolderSync {
             remember(directory)
             let dates = FileDates.read(move.source)
             do {
-                try moveItem(atPath: move.sourcePath, toPath: targetPath)
+                try FileMove.move(atPath: move.sourcePath, toPath: targetPath)
             } catch {
                 outcome.failures.append("\(move.relativeSource): \(error.localizedDescription)")
                 continue
@@ -280,7 +280,7 @@ enum FolderSync {
         var failures: [String] = []
         for moved in outcome.moved.reversed() {
             do {
-                try moveItem(atPath: moved.targetPath, toPath: moved.sourcePath)
+                try FileMove.move(atPath: moved.targetPath, toPath: moved.sourcePath)
                 FileDates.write(moved.dates, toPath: moved.sourcePath)
             } catch {
                 failures.append("\((moved.sourcePath as NSString).lastPathComponent): \(error.localizedDescription)")
@@ -291,33 +291,6 @@ enum FolderSync {
             try? FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: folder)
         }
         return failures
-    }
-
-    /// Verschiebt, ohne zu überschreiben: auf demselben Laufwerk durch Umbenennen (sofort), sonst als Kopie samt
-    /// Metadaten, nach der das Original gelöscht wird. Pfade als Text, damit Namen Byte für Byte bleiben.
-    private static func moveItem(atPath source: String, toPath target: String) throws {
-        func failure(_ code: Int32) -> POSIXError { POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
-        if renamex_np(source, target, UInt32(RENAME_EXCL)) == 0 { return }
-        let code = errno
-        guard code == EXDEV else { throw failure(code) }
-        guard copyfile(source, target, nil, copyfile_flags_t(COPYFILE_ALL | COPYFILE_EXCL)) == 0 else {
-            let code = errno
-            // Halb geschriebene Kopie wieder weg – sie stammt sicher von uns (COPYFILE_EXCL).
-            if code != EEXIST { unlink(target) }
-            throw failure(code)
-        }
-        // Erst löschen, wenn die Kopie vollständig ist.
-        var sourceInfo = stat()
-        var targetInfo = stat()
-        guard stat(source, &sourceInfo) == 0, stat(target, &targetInfo) == 0, sourceInfo.st_size == targetInfo.st_size else {
-            unlink(target)
-            throw failure(EIO)
-        }
-        guard unlink(source) == 0 else {
-            let code = errno
-            unlink(target)
-            throw failure(code)
-        }
     }
 
     private static func sameVolume(_ a: URL, _ b: URL) -> Bool {

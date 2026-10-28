@@ -99,24 +99,25 @@ enum CommandLineScan {
     }
 }
 
-/// Apple Fotos Export ohne Fenster: `PhotoHub --sort <Export-Ordner> <Ziel> [--apply] [--keep-dates]`.
-/// Ohne `--apply` nur Vorschau. Kopiert, der Export bleibt unverändert.
+/// Apple Fotos Export ohne Fenster: `PhotoHub --sort <Export-Ordner> <Ziel> [--apply] [--keep-dates] [--move]`.
+/// Ohne `--apply` nur Vorschau. Kopiert (der Export bleibt unverändert), mit `--move` wird verschoben wie im Skript.
 enum CommandLineSort {
     static func run(_ args: [String]) -> Never {
         let paths = args.filter { !$0.hasPrefix("--") }
         guard paths.count == 2 else {
-            print("Aufruf: PhotoHub --sort <Export-Ordner> <Ziel> [--apply] [--keep-dates]")
+            print("Aufruf: PhotoHub --sort <Export-Ordner> <Ziel> [--apply] [--keep-dates] [--move]")
             exit(2)
         }
         let source = URL(fileURLWithPath: (paths[0] as NSString).expandingTildeInPath, isDirectory: true)
         let destination = URL(fileURLWithPath: (paths[1] as NSString).expandingTildeInPath, isDirectory: true)
         let apply = args.contains("--apply")
         let setDates = !args.contains("--keep-dates")
+        let move = args.contains("--move")
 
         Task.detached {
             do {
                 let plan = try ExportSorter.plan(source: source, destination: destination)
-                print("Modus:  \(apply ? "AUSFÜHRUNG" : "VORSCHAU (keine Änderungen)")")
+                print("Modus:  \(apply ? "AUSFÜHRUNG" : "VORSCHAU (keine Änderungen)"), \(move ? "verschieben" : "kopieren")")
                 print("Quelle: \(source.path)\nZiel:   \(destination.path)\n")
                 for folder in plan.folders {
                     print("\(folder.source.lastPathComponent) -> \(folder.targetName) (\(plural(folder.copies.count + folder.alreadyCopied.count, "Datei", "Dateien")))")
@@ -129,9 +130,11 @@ enum CommandLineSort {
                 print("\nOrdner: \(plan.folders.count), Dateien: \(plan.fileCount), kopieren: \(plan.copyCount) "
                       + "(umbenannt: \(plan.renameCount)), schon im Ziel: \(plan.alreadyCopiedCount), nicht erkannt: \(plan.unrecognized.count)")
                 if apply {
-                    let outcome = try await ExportSorter.apply(source: source, destination: destination, setCaptureDates: setDates) { _ in }
-                    print("Kopiert: \(outcome.copied.count) (umbenannt: \(outcome.renamedCount)), schon im Ziel: \(outcome.alreadyCopiedCount), "
-                          + "Aufnahmezeit gesetzt: \(outcome.datesSet), ohne Aufnahmezeit: \(outcome.datesMissing)")
+                    let outcome = try await ExportSorter.apply(source: source, destination: destination, setCaptureDates: setDates,
+                                                               moveFiles: move) { _ in }
+                    print("\(move ? "Verschoben" : "Kopiert"): \(outcome.transferred.count) (umbenannt: \(outcome.renamedCount)), "
+                          + "schon im Ziel: \(outcome.alreadyCopiedCount), Aufnahmezeit gesetzt: \(outcome.datesSet), "
+                          + "ohne Aufnahmezeit: \(outcome.datesMissing)" + (move ? ", leere Tagesordner entfernt: \(outcome.removedFolders.count)" : ""))
                     for failure in outcome.failures { print("Fehler: \(failure)") }
                 }
                 exit(0)

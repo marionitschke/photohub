@@ -1,6 +1,6 @@
 import AppKit
 
-/// Tab „Apple Fotos Export“: Tagesordner eines Apple-Fotos-Exports in eine Jahr/Monat-Struktur kopieren.
+/// Tab „Apple Fotos Export“: Tagesordner eines Apple-Fotos-Exports in eine Jahr/Monat-Struktur kopieren oder verschieben.
 /// Unabhängig von der Duplikatsuche; nur „Ziel auf Duplikate prüfen“ übergibt den Zielordner dorthin.
 final class SortViewController: NSViewController {
     enum Phase {
@@ -25,11 +25,14 @@ final class SortViewController: NSViewController {
         static let source = "sortSourcePath"
         static let destination = "sortDestinationPath"
         static let setsCaptureDates = "sortSetsCaptureDates"
+        static let movesFiles = "sortMovesFiles"
     }
 
     private var source: URL?
     private var destination: URL?
     private var setsCaptureDates = true
+    /// Verschieben wie im Python-Skript statt kopieren (Standard: kopieren, der Export bleibt).
+    private var movesFiles = false
     private var phase: Phase = .idle
     private var plan = ExportSorter.Plan()
     private var rows: [Row] = []
@@ -44,6 +47,7 @@ final class SortViewController: NSViewController {
     private lazy var chooseSourceButton = NSButton(title: "Wählen …", target: self, action: #selector(chooseSource))
     private lazy var chooseDestinationButton = NSButton(title: "Wählen …", target: self, action: #selector(chooseDestination))
     private lazy var datesCheckbox = NSButton(checkboxWithTitle: "Dateidatum auf Aufnahmezeit setzen", target: self, action: #selector(datesChanged))
+    private lazy var moveCheckbox = NSButton(checkboxWithTitle: "Verschieben statt kopieren", target: self, action: #selector(moveChanged))
     private lazy var refreshButton = NSButton(title: "Vorschau aktualisieren", target: self, action: #selector(refresh))
 
     // Mitte
@@ -67,6 +71,7 @@ final class SortViewController: NSViewController {
         source = defaults.string(forKey: Keys.source).flatMap(Self.existingFolder)
         destination = defaults.string(forKey: Keys.destination).flatMap(Self.existingFolder)
         setsCaptureDates = defaults.object(forKey: Keys.setsCaptureDates) as? Bool ?? true
+        movesFiles = defaults.bool(forKey: Keys.movesFiles)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) wird nicht unterstützt") }
@@ -139,11 +144,15 @@ final class SortViewController: NSViewController {
             field.textColor = .secondaryLabelColor
             return field
         }
-        datesCheckbox.toolTip = "Setzt „Erstellt“, „Geändert“ und „Hinzugefügt“ jeder Kopie auf die Aufnahmezeit aus den Metadaten "
-            + "(EXIF bzw. Video). Die Bilddaten und der Export bleiben unverändert."
+        datesCheckbox.toolTip = "Setzt „Erstellt“, „Geändert“ und „Hinzugefügt“ jeder Datei im Ziel auf die Aufnahmezeit aus den Metadaten "
+            + "(EXIF bzw. Video). Die Bilddaten bleiben unverändert."
+        moveCheckbox.toolTip = "Verschiebt die Dateien aus dem Export, statt sie zu kopieren. Leer gewordene Tagesordner im Export werden "
+            + "entfernt, was schon im Ziel liegt, bleibt im Export. „Rückgängig“ verschiebt alles zurück."
         refreshButton.toolTip = "Export-Ordner und Ziel erneut prüfen"
-        let options = NSStackView(views: [datesCheckbox, NSView(), refreshButton])
-        options.views[1].setContentHuggingPriority(.init(1), for: .horizontal)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let options = NSStackView(views: [datesCheckbox, moveCheckbox, spacer, refreshButton])
+        options.setCustomSpacing(18, after: datesCheckbox)
 
         let grid = NSGridView(views: [
             [label("Export aus Fotos:"), sourceButton, chooseSourceButton],
@@ -239,7 +248,9 @@ final class SortViewController: NSViewController {
         show(sourceButton, source, placeholder: "Kein Export-Ordner gewählt")
         show(destinationButton, destination, placeholder: "Kein Zielordner gewählt")
         datesCheckbox.state = setsCaptureDates ? .on : .off
-        for control in [chooseSourceButton, chooseDestinationButton, datesCheckbox] as [NSControl] { control.isEnabled = !busy }
+        moveCheckbox.state = movesFiles ? .on : .off
+        for control in [chooseSourceButton, chooseDestinationButton, datesCheckbox, moveCheckbox] as [NSControl] { control.isEnabled = !busy }
+        tableView.tableColumn(withIdentifier: .init("copies"))?.title = movesFiles ? "Verschieben" : "Kopieren"
         refreshButton.isEnabled = !busy && source != nil && destination != nil
 
         messageView.isHidden = true
@@ -248,10 +259,13 @@ final class SortViewController: NSViewController {
         switch phase {
         case .idle where source == nil:
             messageView.isHidden = false
+            let text = movesFiles
+                ? "PhotoHub verschiebt die Dateien aus Tagesordnern wie „1. August 2026“ eines Exports der Fotos-App in "
+                    + "Jahr/Monat-Ordner (2026/08) im Ziel. Leer gewordene Tagesordner im Export werden danach entfernt. "
+                : "PhotoHub kopiert Tagesordner wie „1. August 2026“ aus einem Export der Fotos-App in "
+                    + "Jahr/Monat-Ordner (2026/08) im Ziel. Der Export bleibt unverändert, du kannst also jederzeit neu anfangen. "
             messageView.show(symbol: "calendar.badge.plus", title: "Export aus Fotos einsortieren",
-                             text: "PhotoHub kopiert Tagesordner wie „1. August 2026“ aus einem Export der Fotos-App in "
-                                 + "Jahr/Monat-Ordner (2026/08) im Ziel. Der Export bleibt unverändert, du kannst also jederzeit "
-                                 + "neu anfangen. Den Export-Ordner kannst du auch in dieses Fenster ziehen.",
+                             text: text + "Den Export-Ordner kannst du auch in dieses Fenster ziehen.",
                              buttonTitle: "Export-Ordner wählen …") { [weak self] in self?.chooseSource() }
         case .idle where destination == nil:
             messageView.isHidden = false
@@ -274,7 +288,7 @@ final class SortViewController: NSViewController {
         case .done(let outcome):
             messageView.isHidden = false
             messageView.show(symbol: outcome.failures.isEmpty ? "checkmark.circle" : "exclamationmark.triangle",
-                             title: outcome.wasCancelled ? "Abgebrochen" : "Kopiert", text: describe(outcome),
+                             title: outcome.wasCancelled ? "Abgebrochen" : (outcome.movesFiles ? "Verschoben" : "Kopiert"), text: describe(outcome),
                              buttonTitle: "Neue Vorschau") { [weak self] in self?.refresh() }
         case .failed(let title, let message):
             messageView.isHidden = false
@@ -301,7 +315,8 @@ final class SortViewController: NSViewController {
         guard visible else { return }
 
         summaryLabel.isHidden = !ready
-        var parts = [plural(plan.folders.count, "Tagesordner", "Tagesordner"), "\(plural(plan.copyCount, "Datei", "Dateien")) zu kopieren"]
+        var parts = [plural(plan.folders.count, "Tagesordner", "Tagesordner"),
+                     "\(plural(plan.copyCount, "Datei", "Dateien")) zu \(movesFiles ? "verschieben" : "kopieren")"]
         if plan.copyCount > 0 { parts[1] += " (\(plan.copyBytes.formattedBytes))" }
         if plan.renameCount > 0 { parts.append("\(plan.renameCount.formatted()) umbenannt") }
         if plan.alreadyCopiedCount > 0 { parts.append("\(plan.alreadyCopiedCount.formatted()) schon im Ziel") }
@@ -309,7 +324,7 @@ final class SortViewController: NSViewController {
         summaryLabel.stringValue = parts.joined(separator: " · ")
 
         if let outcome = lastOutcome {
-            undoLabel.stringValue = "\(plural(outcome.copied.count, "Datei", "Dateien")) kopiert"
+            undoLabel.stringValue = "\(plural(outcome.transferred.count, "Datei", "Dateien")) \(outcome.movesFiles ? "verschoben" : "kopiert")"
             undoLabel.isHidden = false
             undoButton.isHidden = false
             undoButton.isEnabled = !busy
@@ -318,25 +333,35 @@ final class SortViewController: NSViewController {
             undoButton.isHidden = true
         }
         duplicatesButton.isHidden = lastOutcome == nil || onFindDuplicates == nil
+        applyButton.title = movesFiles ? "Verschieben …" : "Kopieren …"
+        applyButton.image = NSImage(systemSymbolName: movesFiles ? "tray.and.arrow.down" : "doc.on.doc", accessibilityDescription: nil)
         applyButton.isHidden = !ready
         applyButton.isEnabled = ready && plan.copyCount > 0
     }
 
     private func describe(_ outcome: ExportSorter.Outcome) -> String {
-        var sentences = ["\(plural(outcome.copied.count, "Datei", "Dateien")) nach „\(destination?.lastPathComponent ?? "Ziel")“ kopiert"
-            + (outcome.renamedCount > 0 ? ", davon \(outcome.renamedCount.formatted()) wegen gleicher Namen umbenannt." : ".")
-            + " Der Export ist unverändert."]
-        if setsCaptureDates && !outcome.copied.isEmpty {
-            sentences.append("Aufnahmezeit bei \(plural(outcome.datesSet, "Kopie", "Kopien")) als Dateidatum gesetzt"
+        var sentences = ["\(plural(outcome.transferred.count, "Datei", "Dateien")) nach „\(destination?.lastPathComponent ?? "Ziel")“ "
+            + (outcome.movesFiles ? "verschoben" : "kopiert")
+            + (outcome.renamedCount > 0 ? ", davon \(outcome.renamedCount.formatted()) wegen gleicher Namen umbenannt." : ".")]
+        if !outcome.movesFiles {
+            sentences.append("Der Export ist unverändert.")
+        } else if !outcome.removedFolders.isEmpty {
+            sentences.append("\(plural(outcome.removedFolders.count, "leerer Tagesordner wurde", "leere Tagesordner wurden")) im Export entfernt.")
+        }
+        if setsCaptureDates && !outcome.transferred.isEmpty {
+            sentences.append("Aufnahmezeit bei \(plural(outcome.datesSet, "Datei", "Dateien")) als Dateidatum gesetzt"
                 + (outcome.datesMissing > 0 ? ", \(outcome.datesMissing.formatted()) ohne Aufnahmezeit unverändert." : "."))
         }
         if outcome.alreadyCopiedCount > 0 {
-            sentences.append("\(plural(outcome.alreadyCopiedCount, "Datei lag", "Dateien lagen")) schon im Ziel und wurde\(outcome.alreadyCopiedCount == 1 ? "" : "n") übersprungen.")
+            let rest = outcome.movesFiles ? "blieb\(outcome.alreadyCopiedCount == 1 ? "" : "en") im Export"
+                : "wurde\(outcome.alreadyCopiedCount == 1 ? "" : "n") übersprungen"
+            sentences.append("\(plural(outcome.alreadyCopiedCount, "Datei lag", "Dateien lagen")) schon im Ziel und \(rest).")
         }
         if !outcome.failures.isEmpty {
-            sentences.append("Nicht kopiert: " + outcome.failures.prefix(5).joined(separator: "; ") + (outcome.failures.count > 5 ? " …" : ""))
+            sentences.append((outcome.movesFiles ? "Nicht verschoben: " : "Nicht kopiert: ")
+                + outcome.failures.prefix(5).joined(separator: "; ") + (outcome.failures.count > 5 ? " …" : ""))
         }
-        sentences.append("„Rückgängig“ legt die Kopien in den Papierkorb.")
+        sentences.append(outcome.movesFiles ? "„Rückgängig“ verschiebt alles zurück in den Export." : "„Rückgängig“ legt die Kopien in den Papierkorb.")
         return sentences.joined(separator: " ")
     }
 
@@ -376,14 +401,21 @@ final class SortViewController: NSViewController {
         guard case .ready = phase, plan.copyCount > 0, let window = view.window, let destination else { return }
         let alert = NSAlert()
         alert.messageText = "\(plural(plan.copyCount, "Datei", "Dateien")) aus \(plural(plan.folders.count, "Tagesordner", "Tagesordnern")) "
-            + "nach „\(destination.lastPathComponent)“ kopieren?"
-        var text = ["Insgesamt \(plan.copyBytes.formattedBytes). Der Export bleibt unverändert."]
+            + "nach „\(destination.lastPathComponent)“ \(movesFiles ? "verschieben" : "kopieren")?"
+        var text = ["Insgesamt \(plan.copyBytes.formattedBytes). " + (movesFiles
+            ? "Die Dateien werden aus dem Export entfernt, leer gewordene Tagesordner gelöscht."
+            : "Der Export bleibt unverändert.")]
         if plan.renameCount > 0 { text.append("\(plural(plan.renameCount, "Datei wird", "Dateien werden")) wegen gleicher Namen im Ziel umbenannt (…_1).") }
-        if plan.alreadyCopiedCount > 0 { text.append("\(plural(plan.alreadyCopiedCount, "Datei liegt", "Dateien liegen")) schon im Ziel und \(plan.alreadyCopiedCount == 1 ? "wird" : "werden") übersprungen.") }
-        if setsCaptureDates { text.append("Das Dateidatum der Kopien wird auf die Aufnahmezeit gesetzt.") }
-        text.append("„Rückgängig“ legt die Kopien in den Papierkorb.")
+        if plan.alreadyCopiedCount > 0 {
+            let single = plan.alreadyCopiedCount == 1
+            text.append("\(plural(plan.alreadyCopiedCount, "Datei liegt", "Dateien liegen")) schon im Ziel und "
+                + (movesFiles ? "\(single ? "bleibt" : "bleiben") im Export." : "\(single ? "wird" : "werden") übersprungen."))
+        }
+        if setsCaptureDates { text.append("Das Dateidatum der Dateien im Ziel wird auf die Aufnahmezeit gesetzt.") }
+        text.append(movesFiles ? "„Rückgängig“ verschiebt alles zurück in den Export, solange PhotoHub geöffnet ist."
+                               : "„Rückgängig“ legt die Kopien in den Papierkorb.")
         alert.informativeText = text.joined(separator: "\n")
-        alert.addButton(withTitle: "Kopieren")
+        alert.addButton(withTitle: movesFiles ? "Verschieben" : "Kopieren")
         alert.addButton(withTitle: "Abbrechen")
         alert.beginSheetModal(for: window) { [weak self] response in
             if response == .alertFirstButtonReturn { self?.apply() }
@@ -396,8 +428,9 @@ final class SortViewController: NSViewController {
         runID += 1
         let id = runID
         let setDates = setsCaptureDates
+        let moveFiles = movesFiles
         phase = .applying
-        progressView.update(ScanProgress(message: "Kopiere …", done: 0, total: plan.copyCount))
+        progressView.update(ScanProgress(message: moveFiles ? "Verschiebe …" : "Kopiere …", done: 0, total: plan.copyCount))
         render()
         let report: PhotoScanner.ProgressHandler = { [weak self] progress in
             Task { @MainActor in
@@ -408,7 +441,8 @@ final class SortViewController: NSViewController {
         // Eigene Task, damit „Abbrechen“ die Arbeit selbst erreicht (verschachtelte Tasks erben den Abbruch nicht).
         let work = Task.detached(priority: .userInitiated) { () -> Result<ExportSorter.Outcome, Error> in
             do {
-                return .success(try await ExportSorter.apply(source: source, destination: destination, setCaptureDates: setDates, progress: report))
+                return .success(try await ExportSorter.apply(source: source, destination: destination, setCaptureDates: setDates,
+                                                             moveFiles: moveFiles, progress: report))
             } catch {
                 return .failure(error)
             }
@@ -420,10 +454,10 @@ final class SortViewController: NSViewController {
             self.applyWork = nil
             switch result {
             case .success(let outcome):
-                self.lastOutcome = outcome.copied.isEmpty ? nil : outcome
+                self.lastOutcome = outcome.transferred.isEmpty ? nil : outcome
                 self.phase = .done(outcome)
             case .failure(let error):
-                self.phase = .failed(title: "Kopieren nicht möglich", message: error.localizedDescription)
+                self.phase = .failed(title: moveFiles ? "Verschieben nicht möglich" : "Kopieren nicht möglich", message: error.localizedDescription)
             }
             self.render()
         }
@@ -443,8 +477,11 @@ final class SortViewController: NSViewController {
             let failures = await Task.detached(priority: .userInitiated) { ExportSorter.undo(outcome) }.value
             guard let self else { return }
             self.startPlanning()
-            if !failures.isEmpty { self.showError("\(plural(failures.count, "Kopie konnte", "Kopien konnten")) nicht in den Papierkorb "
-                + "gelegt werden:\n\n" + failures.prefix(8).joined(separator: "\n")) }
+            guard !failures.isEmpty else { return }
+            self.showError((outcome.movesFiles
+                ? "\(plural(failures.count, "Datei ließ", "Dateien ließen")) sich nicht zurück in den Export verschieben:\n\n"
+                : "\(plural(failures.count, "Kopie konnte", "Kopien konnten")) nicht in den Papierkorb gelegt werden:\n\n")
+                + failures.prefix(8).joined(separator: "\n"))
         }
     }
 
@@ -513,6 +550,12 @@ final class SortViewController: NSViewController {
     @objc private func datesChanged() {
         setsCaptureDates = datesCheckbox.state == .on
         defaults.set(setsCaptureDates, forKey: Keys.setsCaptureDates)
+    }
+
+    @objc private func moveChanged() {
+        movesFiles = moveCheckbox.state == .on
+        defaults.set(movesFiles, forKey: Keys.movesFiles)
+        render()
     }
 
     @objc private func revealSource() {

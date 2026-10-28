@@ -2,11 +2,12 @@ import Foundation
 
 /// Kopiert aus Apple Fotos exportierte Tagesordner („1. August 2026“) in eine Jahr/Monat-Struktur
 /// (`Ziel/2026/08`). Vorbild ist das Skript `organize_photos.py`, das verschiebt; hier bleibt der Export
-/// unverändert, damit sich alles jederzeit neu machen lässt. Außerdem:
+/// standardmäßig unverändert, damit sich alles jederzeit neu machen lässt. Auf Wunsch wird wie im Skript
+/// verschoben, leer gewordene Tagesordner verschwinden. Außerdem:
 /// - Schon kopierte Dateien werden erkannt (gleicher Name, gleicher Inhalt) – auch unter `Name_1`.
 /// - Dateien gleichen Namens (Live Photo: HEIC + MOV) bekommen bei Konflikten denselben Zusatz `_1`.
 /// - Die Aufnahmezeit wird ohne exiftool gelesen (`CaptureDate`: ImageIO bzw. AVFoundation, mit Zeitzone).
-/// - Rückgängig legt die Kopien in den Papierkorb.
+/// - Rückgängig legt die Kopien in den Papierkorb bzw. verschiebt alles zurück in den Export.
 enum ExportSorter {
     struct Plan: Sendable {
         var folders: [FolderPlan] = []
@@ -44,11 +45,27 @@ enum ExportSorter {
         var isRenamed: Bool { exactName(source) != (targetPath as NSString).lastPathComponent }
     }
 
-    /// Was beim Kopieren entstanden ist – genug, um es zurückzunehmen.
+    /// Was beim Kopieren bzw. Verschieben entstanden ist – genug, um es zurückzunehmen.
     struct Outcome: Sendable {
-        var copied: [URL] = []
+        struct Move: Sendable {
+            let sourcePath: String
+            let targetPath: String
+            /// Daten im Export vorher – `undo` stellt sie wieder her.
+            let dates: FileDates
+        }
+        var movesFiles = false
+        /// Die neuen Dateien im Ziel.
+        var transferred: [URL] = []
+        /// Nur beim Verschieben: woher jede Datei kam.
+        var moved: [Move] = []
+        struct RemovedFolder: Sendable {
+            let path: String
+            let dates: FileDates
+        }
+        /// Beim Verschieben geleerte und deshalb entfernte Tagesordner im Export – mit ihren Daten für `undo`.
+        var removedFolders: [RemovedFolder] = []
         var createdDirectories: [URL] = []
-        /// Änderungsdatum der berührten Zielordner vorher – neue Dateien ändern es.
+        /// Änderungsdatum der berührten Ordner vorher – neue und entfernte Dateien ändern es.
         var folderDates: [URL: Date] = [:]
         var renamedCount = 0
         var alreadyCopiedCount = 0
@@ -198,18 +215,20 @@ enum ExportSorter {
 
     // MARK: - Kopieren
 
-    /// Plant neu (falls sich seit der Vorschau etwas geändert hat) und kopiert. Bei Abbruch bleibt es beim
-    /// bis dahin Kopierten – auch das lässt sich mit `undo` zurücknehmen.
-    static func apply(source: URL, destination: URL, setCaptureDates: Bool,
+    /// Plant neu (falls sich seit der Vorschau etwas geändert hat) und kopiert bzw. verschiebt. Bei Abbruch bleibt es
+    /// beim bis dahin Erledigten – auch das lässt sich mit `undo` zurücknehmen.
+    static func apply(source: URL, destination: URL, setCaptureDates: Bool, moveFiles: Bool,
                       progress: @escaping PhotoScanner.ProgressHandler) async throws -> Outcome {
         let fileManager = FileManager.default
         let plan = try plan(source: source, destination: destination)
-        try checkSpace(for: plan, source: source, destination: destination)
+        try checkSpace(for: plan, source: source, destination: destination, moveFiles: moveFiles)
         var outcome = Outcome()
+        outcome.movesFiles = moveFiles
         outcome.alreadyCopiedCount = plan.alreadyCopiedCount
         let total = plan.copyCount
+        let message = moveFiles ? "Verschiebe …" : "Kopiere …"
         var done = 0
-        progress(ScanProgress(message: "Kopiere …", done: 0, total: total))
+        progress(ScanProgress(message: message, done: 0, total: total))
 
         func remember(_ folder: URL) {
             guard outcome.folderDates[folder] == nil,
@@ -217,9 +236,11 @@ enum ExportSorter {
             outcome.folderDates[folder] = date
         }
         remember(destination)
+        if moveFiles { remember(source) }
 
         folders: for folder in plan.folders where !folder.copies.isEmpty {
             for directory in [folder.target.deletingLastPathComponent(), folder.target] { remember(directory) }
+            if moveFiles { remember(folder.source) }
             for directory in [folder.target.deletingLastPathComponent(), folder.target] where !fileManager.fileExists(atPath: directory.path) {
                 do {
                     try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -243,14 +264,24 @@ enum ExportSorter {
                     suffix += 1
                     targetPath = directory + "/" + renamed(name, suffix)
                 }
+                let previous = moveFiles ? FileDates.read(copy.source) : nil
                 do {
-                    try copyItem(copy.source, toPath: targetPath)
+                    if moveFiles {
+                        try FileMove.move(atPath: copy.source.path, toPath: targetPath)
+                    } else {
+                        try copyItem(copy.source, toPath: targetPath)
+                    }
                 } catch {
                     outcome.failures.append("\(copy.source.lastPathComponent): \(error.localizedDescription)")
                     continue
                 }
+                if let previous {
+                    // Im neuen Ordner zeigt „Hinzugefügt“ sonst „jetzt“ – erst wie im Export, die Aufnahmezeit folgt ggf. unten.
+                    FileDates.write(previous, toPath: targetPath)
+                    outcome.moved.append(.init(sourcePath: copy.source.path, targetPath: targetPath, dates: previous))
+                }
                 let target = URL(fileURLWithPath: targetPath)
-                outcome.copied.append(target)
+                outcome.transferred.append(target)
                 if (targetPath as NSString).lastPathComponent != exactName(copy.source) { outcome.renamedCount += 1 }
                 if setCaptureDates {
                     if let date = await CaptureDate.read(target) {
@@ -263,24 +294,45 @@ enum ExportSorter {
                     }
                 }
                 done += 1
-                if done % 20 == 0 || done == total { progress(ScanProgress(message: "Kopiere …", done: done, total: total)) }
+                if done % 20 == 0 || done == total { progress(ScanProgress(message: message, done: done, total: total)) }
+            }
+            // Wie im Skript: Ein leer gewordener Tagesordner verschwindet (`rmdir` scheitert, solange noch etwas darin liegt).
+            if moveFiles {
+                let dates = FileDates.read(folder.source)
+                if rmdir(folder.source.path) == 0 { outcome.removedFolders.append(.init(path: folder.source.path, dates: dates)) }
             }
         }
         return outcome
     }
 
-    /// Nimmt ein Kopieren zurück: Kopien in den Papierkorb, neu angelegte und wieder leere Zielordner weg,
-    /// Änderungsdaten der Zielordner wie vorher. Gibt nicht Entferntes zurück. Der Export war nie betroffen.
+    /// Nimmt ein Kopieren zurück (Kopien in den Papierkorb) bzw. ein Verschieben (alles zurück in den Export, entfernte
+    /// Tagesordner wieder angelegt). Danach verschwinden neu angelegte und wieder leere Zielordner, die Änderungsdaten
+    /// der Ordner sind wie vorher. Gibt zurück, was nicht ging.
     static func undo(_ outcome: Outcome) -> [String] {
         let fileManager = FileManager.default
-        let trashed = FileTrash.moveToTrash(outcome.copied.filter { fileManager.fileExists(atPath: $0.path) })
+        var failures: [String] = []
+        if outcome.movesFiles {
+            for folder in outcome.removedFolders { mkdir(folder.path, 0o777) }
+            for move in outcome.moved.reversed() {
+                do {
+                    try FileMove.move(atPath: move.targetPath, toPath: move.sourcePath)
+                    FileDates.write(move.dates, toPath: move.sourcePath)
+                } catch {
+                    failures.append("\((move.sourcePath as NSString).lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            // Erstellt und Hinzugefügt der wieder angelegten Ordner; das Änderungsdatum folgt unten aus `folderDates`.
+            for folder in outcome.removedFolders { FileDates.write(folder.dates, toPath: folder.path) }
+        } else {
+            failures = FileTrash.moveToTrash(outcome.transferred.filter { fileManager.fileExists(atPath: $0.path) }).failed
+        }
         for directory in outcome.createdDirectories.reversed() where (try? fileManager.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
             try? fileManager.removeItem(at: directory)
         }
         for (folder, date) in outcome.folderDates {
             try? fileManager.setAttributes([.modificationDate: date], ofItemAtPath: folder.path)
         }
-        return trashed.failed
+        return failures
     }
 
     /// Kopiert wie `cp -c`: auf APFS als Klon (sofort, belegt keinen zusätzlichen Platz, bis sich eine Seite
@@ -295,15 +347,15 @@ enum ExportSorter {
         }
     }
 
-    /// Auf einem anderen Laufwerk (oder ohne Klon-Unterstützung) müssen die Kopien in den freien Platz passen.
-    private static func checkSpace(for plan: Plan, source: URL, destination: URL) throws {
+    /// Auf einem anderen Laufwerk (beim Kopieren auch ohne Klon-Unterstützung) müssen die Dateien in den freien Platz passen.
+    /// Verschieben auf demselben Laufwerk ist nur ein Umbenennen.
+    private static func checkSpace(for plan: Plan, source: URL, destination: URL, moveFiles: Bool) throws {
         let keys: Set<URLResourceKey> = [.volumeIdentifierKey, .volumeSupportsFileCloningKey, .volumeAvailableCapacityForImportantUsageKey]
         guard let target = try? destination.resourceValues(forKeys: keys),
               let available = target.volumeAvailableCapacityForImportantUsage else { return }
         let sourceVolume = (try? source.resourceValues(forKeys: [.volumeIdentifierKey]))?.volumeIdentifier
-        let clones = target.volumeSupportsFileCloning == true && sourceVolume != nil
-            && (sourceVolume as? NSObject)?.isEqual(target.volumeIdentifier) == true
-        guard !clones else { return }
+        let sameVolume = sourceVolume != nil && (sourceVolume as? NSObject)?.isEqual(target.volumeIdentifier) == true
+        guard !(sameVolume && (moveFiles || target.volumeSupportsFileCloning == true)) else { return }
         let needed = plan.copyBytes
         if needed > available { throw SortError.notEnoughSpace(needed: needed, available: available) }
     }
